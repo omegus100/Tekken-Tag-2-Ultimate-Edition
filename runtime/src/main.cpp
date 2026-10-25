@@ -92,8 +92,13 @@ int main(int argc, char** argv) {
     if (const char* save = std::getenv("TTT2_SAVE_DIR")) {
         vfs::set_save_root(save);
     } else {
+#ifdef _WIN32
+        const char* home = std::getenv("LOCALAPPDATA");
+        vfs::set_save_root(std::filesystem::path(home ? home : ".") / "ttt2/save");
+#else
         const char* home = std::getenv("HOME");
         vfs::set_save_root(std::filesystem::path(home ? home : ".") / ".local/share/ttt2/save");
+#endif
     }
     const auto rpx = vfs::read_whole("/vol/code/Tekken.rpx");
     if (!rpx) fatal("the game source has no code/Tekken.rpx");

@@ -12,9 +12,14 @@
 
 #include <SDL3/SDL.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shlobj.h>
+#else
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -46,22 +51,60 @@ struct Failure : std::runtime_error {
 [[noreturn]] void fail_errno(const std::string& what) { fail(what + ": " + std::strerror(errno)); }
 
 fs::path home() {
+#ifdef _WIN32
+    const char* h = std::getenv("USERPROFILE");
+    return h && *h ? fs::path(h) : fs::path("C:/Users");
+#else
     const char* h = std::getenv("HOME");
     return h && *h ? fs::path(h) : fs::path("/");
+#endif
+}
+
+// Config and data base dirs.
+fs::path config_base() {
+#ifdef _WIN32
+    const char* v = std::getenv("APPDATA");
+    return v && *v ? fs::path(v) : home() / "AppData/Roaming";
+#else
+    const char* v = std::getenv("XDG_CONFIG_HOME");
+    return v && *v == '/' ? fs::path(v) : home() / ".config";
+#endif
+}
+fs::path data_base() {
+#ifdef _WIN32
+    const char* v = std::getenv("LOCALAPPDATA");
+    return v && *v ? fs::path(v) : home() / "AppData/Local";
+#else
+    const char* v = std::getenv("XDG_DATA_HOME");
+    return v && *v == '/' ? fs::path(v) : home() / ".local/share";
+#endif
 }
 
 // $XDG_CONFIG_HOME and $XDG_DATA_HOME (absolute paths only, as the
 // specification says).
 fs::path xdg(const char* variable, const char* fallback) {
+#ifdef _WIN32
+    (void)variable; (void)fallback;
+    return config_base();
+#else
     const char* v = std::getenv(variable);
     return v && *v == '/' ? fs::path(v) : home() / fallback;
+#endif
 }
 
-fs::path config_file() { return xdg("XDG_CONFIG_HOME", ".config") / "ttt2" / "installed"; }
+fs::path config_file() { return config_base() / "ttt2" / "installed"; }
 
 // This executable, readable even when its file has been replaced (a
 // rebuild during an install).
+#ifdef _WIN32
+fs::path self_path() {
+    wchar_t buf[32768];
+    DWORD len = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
+    return len ? fs::path(buf) : fs::path{};
+}
+#else
 const fs::path kSelf = "/proc/self/exe";
+#endif
 
 std::string gigabytes(uint64_t bytes) {
     char text[32];
@@ -385,6 +428,24 @@ void copy_title(Source& source, const fs::path& game, uint32_t& changed) {
         if (ec) fail("cannot create " + target.parent_path().string() + ": " + ec.message());
         fs::path part = target;
         part += ".part";
+#ifdef _WIN32
+        {
+            std::ofstream out(part, std::ios::binary);
+            if (!out) fail("cannot write " + part.string());
+            try {
+                for (uint64_t offset = 0; offset < e.size;) {
+                    const uint64_t length = std::min<uint64_t>(buffer.size(), e.size - offset);
+                    source.read(e, offset, length, buffer.data());
+                    out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(length));
+                    if (!out) fail("cannot write " + part.string());
+                    offset += length;
+                    progress.copied(length);
+                }
+            } catch (...) { throw; }
+        }
+        fs::rename(part, target, ec);
+        if (ec) fail("cannot rename " + part.string() + ": " + ec.message());
+#else
         const int fd = ::open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (fd < 0) fail_errno("cannot write " + part.string());
         try {
@@ -406,6 +467,7 @@ void copy_title(Source& source, const fs::path& game, uint32_t& changed) {
         }
         if (::close(fd) != 0) fail_errno("cannot write " + part.string());
         if (::rename(part.c_str(), target.c_str()) != 0) fail_errno("cannot rename " + part.string());
+#endif
     }
     progress.finish();
 }
@@ -413,7 +475,10 @@ void copy_title(Source& source, const fs::path& game, uint32_t& changed) {
 void install_executable(const fs::path& folder) {
     const fs::path target = folder / kName;
     std::error_code ec;
-    if (fs::equivalent(kSelf, target, ec)) return; // the installed copy is running
+#ifdef _WIN32
+    const fs::path kSelf = self_path();
+#endif
+    if (kSelf.empty() || fs::equivalent(kSelf, target, ec)) return;
     fs::path part = target;
     part += ".part";
     fs::copy_file(kSelf, part, fs::copy_options::overwrite_existing, ec);
@@ -545,10 +610,12 @@ int install(const std::vector<std::string>& positional, bool launcher) {
     copy_title(source, folder / "game", changed);
     install_executable(folder);
     install_icon(source.read_all("meta/iconTex.tga"), folder);
+#ifndef _WIN32
     if (const int fd = ::open(folder.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC); fd >= 0) {
         ::syncfs(fd); // (the renames too)
         ::close(fd);
     }
+#endif
     {
         std::ofstream marker(folder / kMarker);
         marker << "TEKKEN TAG 2 Wii U EDITION (EU) v16\nrpx-sha256 " << cafe_program_info.rpx_sha256 << '\n';
@@ -556,7 +623,9 @@ int install(const std::vector<std::string>& positional, bool launcher) {
     }
     fs::remove(folder / kStarted, ec);
     record(folder);
+#ifndef _WIN32
     if (launcher) install_launcher(folder);
+#endif
 
     if (changed > 0) {
         std::fprintf(stderr, "ttt2: kept %u %s from the game's (delete one and install again to restore it)\n", changed,
@@ -599,7 +668,11 @@ int run(const std::vector<std::string>& args) {
         }
         return updating ? update(positional) : install(positional, launcher);
     } catch (const std::exception& e) {
+#ifdef _WIN32
+        std::fprintf(stderr, "\nttt2: install: %s\n", e.what());
+#else
         std::fprintf(stderr, "%sttt2: install: %s\n", isatty(STDERR_FILENO) ? "\n" : "", e.what());
+#endif
         machine_line(std::string("@error ") + e.what());
         return 1;
     }
@@ -608,8 +681,13 @@ int run(const std::vector<std::string>& args) {
 std::optional<fs::path> installed_game() {
     std::vector<fs::path> folders;
     std::error_code ec;
+#ifdef _WIN32
+    const fs::path self = self_path();
+    if (!self.empty()) folders.push_back(self.parent_path());
+#else
     const fs::path self = fs::read_symlink("/proc/self/exe", ec);
     if (!ec) folders.push_back(self.parent_path());
+#endif
     if (const auto recorded = recorded_folder()) folders.push_back(*recorded);
     for (const fs::path& folder : folders) {
         if (fs::exists(folder / kMarker, ec)) return folder / "game";

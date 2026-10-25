@@ -13,6 +13,9 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 namespace cafe::os {
 namespace {
@@ -111,6 +114,28 @@ void finish(Thread* t, uint32_t exit_value) {
     wake(thread); // joiners
 }
 
+#ifdef _WIN32
+DWORD WINAPI host_main(LPVOID argument) {
+    Thread* t = static_cast<Thread*>(argument);
+    char name[16];
+    std::snprintf(name, sizeof(name), "%08X/%d", t->guest, t->core);
+    wchar_t wname[16];
+    std::mbstowcs(wname, name, 16);
+    SetThreadDescription(GetCurrentThread(), wname);
+    t_current = t;
+    set_current_context(&t->ctx);
+    uint32_t exit_value;
+    if (setjmp(t->exit_jump) == 0) {
+        const uint32_t entry = field<uint32_t>(t->guest, kEntry);
+        cafe_ppc_lookup(entry)(t->ctx, guest_base());
+        exit_value = t->ctx.r[3];
+    } else {
+        exit_value = t->ctx.r[3];
+    }
+    finish(t, exit_value);
+    return 0;
+}
+#else
 void* host_main(void* argument) {
     Thread* t = static_cast<Thread*>(argument);
     // "OSThread address/core", for debuggers and profilers.
@@ -130,8 +155,17 @@ void* host_main(void* argument) {
     finish(t, exit_value);
     return nullptr;
 }
+#endif
 
 void start_host_thread(Thread* t) {
+#ifdef _WIN32
+    t->host = CreateThread(nullptr, kHostStackSize, host_main, t, 0, nullptr);
+    if (t->host == nullptr) {
+        fatal("cannot create a host thread for guest thread 0x%08X: error %lu", t->guest, GetLastError());
+    }
+    CloseHandle(t->host);
+    t->host = INVALID_HANDLE_VALUE;
+#else
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, kHostStackSize);
@@ -140,11 +174,16 @@ void start_host_thread(Thread* t) {
     }
     pthread_attr_destroy(&attr);
     pthread_detach(t->host);
+#endif
     t->host_started = true;
 }
 
 // Runs deferred guest work (thread deallocators) in its own context.
+#ifdef _WIN32
+DWORD WINAPI system_thread_main(LPVOID) {
+#else
 void* system_thread_main(void*) {
+#endif
     Thread* t = g_system_thread;
     t_current = t;
     set_current_context(&t->ctx);
@@ -158,7 +197,11 @@ void* system_thread_main(void*) {
         }
         work(t->ctx);
     }
+#ifdef _WIN32
+    return 0;
+#else
     return nullptr;
+#endif
 }
 
 // A guest thread for runtime-internal work: OSThread structure and stack in
@@ -213,6 +256,10 @@ int run_main_thread(uint32_t entry, uint32_t argc, uint32_t argv, uint32_t stack
     {
         KernelLock lock(g_kernel);
         g_system_thread = make_internal_thread("cafe system", 0x10000, 2);
+#ifdef _WIN32
+        HANDLE system_handle = CreateThread(nullptr, kHostStackSize, system_thread_main, nullptr, 0, nullptr);
+        if (system_handle != nullptr) CloseHandle(system_handle);
+#else
         pthread_t system;
         pthread_attr_t attr;
         pthread_attr_init(&attr);
@@ -220,6 +267,7 @@ int run_main_thread(uint32_t entry, uint32_t argc, uint32_t argv, uint32_t stack
         pthread_create(&system, &attr, system_thread_main, nullptr);
         pthread_attr_destroy(&attr);
         pthread_detach(system);
+#endif
     }
 
     // The main thread runs on core 1 with the stack size from the RPX file
@@ -242,6 +290,14 @@ int run_main_thread(uint32_t entry, uint32_t argc, uint32_t argv, uint32_t stack
         set_state(thread, kRunning);
         g_threads[thread] = t;
     }
+#ifdef _WIN32
+    HANDLE host = CreateThread(nullptr, kHostStackSize, host_main, t, 0, nullptr);
+    if (host == nullptr) {
+        fatal("cannot create main host thread: error %lu", GetLastError());
+    }
+    WaitForSingleObject(host, INFINITE);
+    CloseHandle(host);
+#else
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, kHostStackSize);
@@ -249,6 +305,7 @@ int run_main_thread(uint32_t entry, uint32_t argc, uint32_t argv, uint32_t stack
     pthread_create(&host, &attr, host_main, t);
     pthread_attr_destroy(&attr);
     pthread_join(host, nullptr);
+#endif
     // Returning from the RPX entry point ends the process with its result.
     return static_cast<int32_t>(field<uint32_t>(thread, kExitValue));
 }

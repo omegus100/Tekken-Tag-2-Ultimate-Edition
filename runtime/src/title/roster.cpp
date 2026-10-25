@@ -329,9 +329,15 @@ struct Pack {
 
 fs::path packs_directory() {
     if (const char* dir = std::getenv("TTT2_CHARACTERS"); dir && *dir) return dir;
+#ifdef _WIN32
+    if (const char* data = std::getenv("LOCALAPPDATA"); data && *data) return fs::path(data) / "ttt2/characters";
+    const char* home = std::getenv("USERPROFILE");
+    return fs::path(home ? home : ".") / "AppData/Local/ttt2/characters";
+#else
     if (const char* data = std::getenv("XDG_DATA_HOME"); data && *data) return fs::path(data) / "ttt2/characters";
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / ".local/share/ttt2/characters";
+#endif
 }
 
 std::string trim(const std::string& s) {

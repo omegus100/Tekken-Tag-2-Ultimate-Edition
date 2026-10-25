@@ -1,6 +1,10 @@
 #include "host/keymap.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/stat.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -69,8 +73,13 @@ Key key_of(std::string_view value, const Resolver& resolve) {
 }
 
 fs::path home() {
+#ifdef _WIN32
+    const char* h = std::getenv("USERPROFILE");
+    return h && *h ? fs::path(h) : fs::path("C:/Users");
+#else
     const char* h = std::getenv("HOME");
     return h && *h ? fs::path(h) : fs::path("/");
+#endif
 }
 
 } // namespace
@@ -132,13 +141,29 @@ Parsed parse(std::string_view text, const Resolver& resolve) {
 }
 
 fs::path file_path() {
+#ifdef _WIN32
+    const char* config = std::getenv("APPDATA");
+    return (config && *config ? fs::path(config) : home() / "AppData/Roaming") / "ttt2" / "keyboard.ini";
+#else
     const char* config = std::getenv("XDG_CONFIG_HOME");
     return (config && *config == '/' ? fs::path(config) : home() / ".config") / "ttt2" / "keyboard.ini";
+#endif
 }
 
 Loaded load(const fs::path& file, const Resolver& resolve) {
     Loaded loaded{default_keys(), {}};
     const std::string name = file.string();
+#ifdef _WIN32
+    const DWORD attrs = GetFileAttributesA(file.string().c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        loaded.log.push_back("keyboard: defaults (no " + name + ")");
+        return loaded;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        loaded.log.push_back("keyboard: defaults (" + name + " is not a file)");
+        return loaded;
+    }
+#else
     struct stat st{};
     if (::stat(file.c_str(), &st) != 0) {
         const int error = errno;
@@ -152,6 +177,7 @@ Loaded load(const fs::path& file, const Resolver& resolve) {
         loaded.log.push_back("keyboard: defaults (" + name + " is not a file)");
         return loaded;
     }
+#endif
     if (static_cast<uint64_t>(st.st_size) > kMaxFileSize) {
         loaded.log.push_back("keyboard: defaults (" + name + " is larger than 64 KiB)");
         return loaded;

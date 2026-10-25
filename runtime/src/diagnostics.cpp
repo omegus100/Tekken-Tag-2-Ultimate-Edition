@@ -2,10 +2,14 @@
 #include "cafe/ppc_ops.h"
 #include "cafe/runtime.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -33,6 +37,7 @@ void print_backtrace(const PPCContext& ctx) {
     }
 }
 
+#ifndef _WIN32
 void fault_handler(int signal, siginfo_t* info, void* context) {
     const auto host = reinterpret_cast<uintptr_t>(info->si_addr);
     const auto base = reinterpret_cast<uintptr_t>(guest_base());
@@ -62,6 +67,39 @@ void fault_handler(int signal, siginfo_t* info, void* context) {
     }
     std::_Exit(128 + signal);
 }
+#else
+LONG WINAPI win_fault_handler(EXCEPTION_POINTERS* ep) {
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const auto base = reinterpret_cast<uintptr_t>(guest_base());
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        const auto host = static_cast<uintptr_t>(ep->ExceptionRecord->ExceptionInformation[1]);
+        if (base != 0 && host >= base && host - base < (uint64_t{1} << 32) + 0x10000) {
+            const uint64_t guest = host - base;
+            std::fprintf(stderr, "\nguest memory fault: access to unmapped guest address 0x%08llX\n",
+                         static_cast<unsigned long long>(guest));
+            if (t_current != nullptr && guest < t_current->r[1] && t_current->r[1] - guest <= (4u << 20)) {
+                std::fprintf(stderr, "(0x%llX bytes below the stack pointer: a stack overflow)\n",
+                             static_cast<unsigned long long>(t_current->r[1] - guest));
+            }
+        } else {
+            std::fprintf(stderr, "\nhost fault (code 0x%lX) at 0x%p\n", code,
+                         ep->ExceptionRecord->ExceptionAddress);
+        }
+    } else {
+        std::fprintf(stderr, "\nhost fault (code 0x%lX) at 0x%p\n", code,
+                     ep->ExceptionRecord->ExceptionAddress);
+    }
+    const auto pc = static_cast<uintptr_t>(ep->ContextRecord->Rip);
+    std::fprintf(stderr, "host rip: 0x%llx\n", static_cast<unsigned long long>(pc));
+    if (t_current != nullptr) {
+        print_guest_state(*t_current);
+    }
+    std::_Exit(static_cast<int>(0xC0000005));
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 } // namespace
 
@@ -96,6 +134,9 @@ void fatal(const char* format, ...) {
 }
 
 void install_fault_handler() {
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, win_fault_handler);
+#else
     static char alternate_stack[64 * 1024];
     stack_t stack{};
     stack.ss_sp = alternate_stack;
@@ -106,6 +147,7 @@ void install_fault_handler() {
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGSEGV, &action, nullptr);
     sigaction(SIGBUS, &action, nullptr);
+#endif
 }
 
 } // namespace cafe

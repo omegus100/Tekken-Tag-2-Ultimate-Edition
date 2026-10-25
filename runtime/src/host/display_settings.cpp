@@ -86,8 +86,13 @@ std::string summary(const Settings& s) {
 bool set(const char* value) { return value != nullptr && *value != '\0'; }
 
 fs::path home() {
+#ifdef _WIN32
+    const char* h = std::getenv("USERPROFILE");
+    return h && *h ? fs::path(h) : fs::path("C:/Users");
+#else
     const char* h = std::getenv("HOME");
     return h && *h ? fs::path(h) : fs::path("/");
+#endif
 }
 
 Active g_active;
@@ -202,8 +207,13 @@ std::string format(const Settings& settings) {
 }
 
 fs::path file_path() {
+#ifdef _WIN32
+    const char* config = std::getenv("APPDATA");
+    return (config && *config ? fs::path(config) : home() / "AppData/Roaming") / "ttt2" / "display.ini";
+#else
     const char* config = std::getenv("XDG_CONFIG_HOME");
     return (config && *config == '/' ? fs::path(config) : home() / ".config") / "ttt2" / "display.ini";
+#endif
 }
 
 Loaded load(const fs::path& file) {
