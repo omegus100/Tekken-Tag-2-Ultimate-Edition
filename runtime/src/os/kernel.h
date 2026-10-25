@@ -17,11 +17,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <pthread.h>
-#endif
 
 namespace cafe::os {
 
@@ -61,11 +57,7 @@ be<T>& field(uint32_t object, uint32_t offset) {
 struct Thread {
     uint32_t guest = 0; // OSThread
     PPCContext ctx{};
-#ifdef _WIN32
-    HANDLE host = INVALID_HANDLE_VALUE;
-#else
     pthread_t host{};
-#endif
     bool host_started = false;
     bool finished = false; // entry returned or OSExitThread ran
     bool interrupts_disabled = false;

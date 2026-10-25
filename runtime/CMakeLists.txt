@@ -1,5 +1,11 @@
-find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 find_package(ZLIB REQUIRED)
+find_package(Threads REQUIRED)
+if(WIN32)
+    set(CAFE_HOST_LIBS bcrypt ws2_32)
+else()
+    find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
+    set(CAFE_HOST_LIBS OpenSSL::Crypto)
+endif()
 
 # Linked as objects, not an archive: strong import implementations here must
 # replace the weak defaults in the generated imports.cpp, and the export
@@ -70,24 +76,11 @@ target_compile_features(cafe_runtime PUBLIC cxx_std_20)
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
 # GLSL -> SPIR-V at run time.
-if(WIN32)
-    find_library(SHADERC_LIBRARY NAMES shaderc_combined shaderc_shared REQUIRED)
-else()
-    find_library(SHADERC_LIBRARY NAMES shaderc_shared REQUIRED)
-endif()
-if(WIN32)
-    target_link_libraries(cafe_runtime PUBLIC cafe_rpx cafe_title OpenSSL::Crypto ZArchive::zarchive amd_addrlib cafe_latte
-        Vulkan::Vulkan SDL3::SDL3 ${SHADERC_LIBRARY} shlwapi)
-else()
-    target_link_libraries(cafe_runtime PUBLIC cafe_rpx cafe_title OpenSSL::Crypto ZArchive::zarchive amd_addrlib cafe_latte
-        Vulkan::Vulkan SDL3::SDL3 ${SHADERC_LIBRARY})
-endif()
+find_library(SHADERC_LIBRARY NAMES shaderc_shared REQUIRED)
+target_link_libraries(cafe_runtime PUBLIC cafe_rpx cafe_title ${CAFE_HOST_LIBS} Threads::Threads ZArchive::zarchive amd_addrlib cafe_latte
+    Vulkan::Vulkan SDL3::SDL3 ${SHADERC_LIBRARY})
 # Vulkan structures are initialised with only their sType.
-if(MSVC)
-    target_compile_options(cafe_runtime PRIVATE /W4 /wd4324 /wd4100)
-else()
-    target_compile_options(cafe_runtime PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
-endif()
+target_compile_options(cafe_runtime PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
 
 # The title's file formats and the pictures and texts made from them
 # (title/): no runtime, so tests use them on synthetic data.
@@ -101,11 +94,7 @@ add_library(cafe_title STATIC
 target_include_directories(cafe_title PUBLIC src)
 target_compile_features(cafe_title PUBLIC cxx_std_20)
 target_link_libraries(cafe_title PUBLIC ZLIB::ZLIB)
-if(MSVC)
-    target_compile_options(cafe_title PRIVATE /W4 /wd4324 /wd4100)
-else()
-    target_compile_options(cafe_title PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+target_compile_options(cafe_title PRIVATE -Wall -Wextra -Wpedantic)
 
 # Latte shader decoding and translation, shared by the runtime and tools.
 add_library(cafe_latte STATIC
@@ -116,16 +105,8 @@ add_library(cafe_latte STATIC
     src/latte/translate.cpp)
 target_include_directories(cafe_latte PUBLIC src)
 target_compile_features(cafe_latte PUBLIC cxx_std_20)
-if(MSVC)
-    target_compile_options(cafe_latte PRIVATE /W4 /wd4324 /wd4100)
-else()
-    target_compile_options(cafe_latte PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+target_compile_options(cafe_latte PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(cafe-shader src/latte/cafe_shader_main.cpp)
 target_link_libraries(cafe-shader PRIVATE cafe_latte ${SHADERC_LIBRARY})
-if(MSVC)
-    target_compile_options(cafe-shader PRIVATE /W4 /wd4324 /wd4100)
-else()
-    target_compile_options(cafe-shader PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+target_compile_options(cafe-shader PRIVATE -Wall -Wextra -Wpedantic)

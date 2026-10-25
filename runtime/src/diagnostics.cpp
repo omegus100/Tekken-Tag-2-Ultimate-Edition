@@ -37,22 +37,55 @@ void print_backtrace(const PPCContext& ctx) {
     }
 }
 
-#ifndef _WIN32
-void fault_handler(int signal, siginfo_t* info, void* context) {
-    const auto host = reinterpret_cast<uintptr_t>(info->si_addr);
+void report_fault(uintptr_t host, int signal) {
     const auto base = reinterpret_cast<uintptr_t>(guest_base());
     if (base != 0 && host >= base && host - base < (uint64_t{1} << 32) + 0x10000) {
         const uint64_t guest = host - base;
         std::fprintf(stderr, "\nguest memory fault: access to unmapped guest address 0x%08llX\n",
                      static_cast<unsigned long long>(guest));
-        // Just below the stack pointer: a frame larger than the stack left.
         if (t_current != nullptr && guest < t_current->r[1] && t_current->r[1] - guest <= (4u << 20)) {
             std::fprintf(stderr, "(0x%llX bytes below the stack pointer: a stack overflow)\n",
                          static_cast<unsigned long long>(t_current->r[1] - guest));
         }
     } else {
-        std::fprintf(stderr, "\nhost fault (signal %d) at %p\n", signal, info->si_addr);
+        std::fprintf(stderr, "\nhost fault (signal %d) at 0x%llx\n", signal,
+                     static_cast<unsigned long long>(host));
     }
+}
+
+void report_guest_state_and_exit(int signal) {
+    if (t_current != nullptr) {
+        print_guest_state(*t_current);
+    }
+    std::fflush(stderr);
+    std::_Exit(128 + signal);
+}
+
+#ifdef _WIN32
+LONG CALLBACK fault_handler(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD& record = *info->ExceptionRecord;
+    if (record.ExceptionCode != EXCEPTION_ACCESS_VIOLATION &&
+        record.ExceptionCode != EXCEPTION_STACK_OVERFLOW) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    report_fault(record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION
+                     ? static_cast<uintptr_t>(record.ExceptionInformation[1]) : 0, 11);
+    const auto pc = static_cast<uintptr_t>(info->ContextRecord->Rip);
+    HMODULE module = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(pc), &module)) {
+        GetModuleFileNameA(module, name, sizeof name);
+    }
+    std::fprintf(stderr, "host code: %s+0x%llx\n", name,
+                 static_cast<unsigned long long>(pc - reinterpret_cast<uintptr_t>(module)));
+    report_guest_state_and_exit(11);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
+void fault_handler(int signal, siginfo_t* info, void* context) {
+    report_fault(reinterpret_cast<uintptr_t>(info->si_addr), signal);
     // Where in the recompiled code: `addr2line -f -e <executable> <offset>`
     // names the guest function (sub_XXXXXXXX).
     const auto* uc = static_cast<const ucontext_t*>(context);
@@ -62,42 +95,7 @@ void fault_handler(int signal, siginfo_t* info, void* context) {
         std::fprintf(stderr, "host code: %s+0x%llx\n", where.dli_fname,
                      static_cast<unsigned long long>(pc - reinterpret_cast<uintptr_t>(where.dli_fbase)));
     }
-    if (t_current != nullptr) {
-        print_guest_state(*t_current);
-    }
-    std::_Exit(128 + signal);
-}
-#else
-LONG WINAPI win_fault_handler(EXCEPTION_POINTERS* ep) {
-    const DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW)
-        return EXCEPTION_CONTINUE_SEARCH;
-    const auto base = reinterpret_cast<uintptr_t>(guest_base());
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
-        const auto host = static_cast<uintptr_t>(ep->ExceptionRecord->ExceptionInformation[1]);
-        if (base != 0 && host >= base && host - base < (uint64_t{1} << 32) + 0x10000) {
-            const uint64_t guest = host - base;
-            std::fprintf(stderr, "\nguest memory fault: access to unmapped guest address 0x%08llX\n",
-                         static_cast<unsigned long long>(guest));
-            if (t_current != nullptr && guest < t_current->r[1] && t_current->r[1] - guest <= (4u << 20)) {
-                std::fprintf(stderr, "(0x%llX bytes below the stack pointer: a stack overflow)\n",
-                             static_cast<unsigned long long>(t_current->r[1] - guest));
-            }
-        } else {
-            std::fprintf(stderr, "\nhost fault (code 0x%lX) at 0x%p\n", code,
-                         ep->ExceptionRecord->ExceptionAddress);
-        }
-    } else {
-        std::fprintf(stderr, "\nhost fault (code 0x%lX) at 0x%p\n", code,
-                     ep->ExceptionRecord->ExceptionAddress);
-    }
-    const auto pc = static_cast<uintptr_t>(ep->ContextRecord->Rip);
-    std::fprintf(stderr, "host rip: 0x%llx\n", static_cast<unsigned long long>(pc));
-    if (t_current != nullptr) {
-        print_guest_state(*t_current);
-    }
-    std::_Exit(static_cast<int>(0xC0000005));
-    return EXCEPTION_CONTINUE_SEARCH;
+    report_guest_state_and_exit(signal);
 }
 #endif
 
@@ -135,7 +133,10 @@ void fatal(const char* format, ...) {
 
 void install_fault_handler() {
 #ifdef _WIN32
-    AddVectoredExceptionHandler(1, win_fault_handler);
+    // Reserve stack space so a stack overflow can still be reported.
+    ULONG reserve = 64 * 1024;
+    SetThreadStackGuarantee(&reserve);
+    AddVectoredExceptionHandler(1, fault_handler);
 #else
     static char alternate_stack[64 * 1024];
     stack_t stack{};
